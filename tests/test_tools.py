@@ -17,6 +17,7 @@ from server import (
     _fragment_fields,
     _get_fragment,
     _get_page,
+    _node_kind,
     _validate_path,
 )
 
@@ -107,6 +108,53 @@ def test_dedupe_keeps_distinct_pages_with_the_same_leaf_name():
         _hit("/content/wknd/us/en/magazine/index", "Magazine"),
     ]
     assert len(_dedupe_locale_copies(hits)) == 2
+
+
+# --- recovering from the wrong tool ----------------------------------------
+
+FRAGMENT_NODE = {
+    "jcr:primaryType": "dam:Asset",
+    "jcr:content": {
+        "jcr:primaryType": "dam:AssetContent",
+        "jcr:title": "Ski Touring",
+        "contentFragment": True,
+        "data": {"master": {"title": "Ski Touring", "main": "body"}},
+    },
+}
+
+PAGE_NODE = {
+    "jcr:primaryType": "cq:Page",
+    "jcr:content": {
+        "jcr:primaryType": "cq:PageContent",
+        "jcr:title": "Ski Touring Mont Blanc",
+        "root": {"text": "body copy"},
+    },
+}
+
+
+def test_node_kind_distinguishes_fragments_pages_and_assets():
+    assert _node_kind(FRAGMENT_NODE) == "fragment"
+    assert _node_kind(PAGE_NODE) == "page"
+    assert _node_kind({"jcr:primaryType": "dam:Asset"}) == "asset"
+    assert _node_kind({"jcr:primaryType": "sling:Folder"}) is None
+
+
+def test_get_page_on_a_fragment_redirects_instead_of_guessing(monkeypatch):
+    """A fragment has a jcr:content node, so this used to return partial junk."""
+    monkeypatch.setattr(server, "aem_get", lambda path, params=None: FRAGMENT_NODE)
+    out = _get_page("/content/dam/wknd-shared/en/magazine/skitouring/skitouring")
+
+    assert "Content Fragment" in out
+    assert "get_fragment" in out
+    assert "Title:" not in out
+
+
+def test_get_fragment_on_a_page_redirects(monkeypatch):
+    monkeypatch.setattr(server, "aem_get", lambda path, params=None: PAGE_NODE)
+    out = _get_fragment("/content/wknd/us/en/adventures/ski-touring-mont-blanc")
+
+    assert "not a Content Fragment" in out
+    assert "get_page" in out
 
 
 # --- authored content fencing ----------------------------------------------

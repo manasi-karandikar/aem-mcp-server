@@ -122,6 +122,24 @@ def _fragment_fields(variation: dict, limit_chars: int = FRAGMENT_VALUE_CHARS) -
     return out
 
 
+def _node_kind(data: dict) -> str | None:
+    """Identify what a node actually is, so wrong tool choices can be redirected.
+
+    The model will pick the wrong tool sometimes. The useful question is not
+    how to prevent that, but how it recovers — so these tools name what they
+    found and which tool handles it.
+    """
+    content = data.get("jcr:content") or {}
+    if content.get("contentFragment"):
+        return "fragment"
+    if (data.get("jcr:primaryType") == "cq:Page"
+            or content.get("jcr:primaryType") == "cq:PageContent"):
+        return "page"
+    if data.get("jcr:primaryType") == "dam:Asset":
+        return "asset"
+    return None
+
+
 def _dedupe_locale_copies(hits: list) -> list:
     """Collapse MSM live copies of the same page.
 
@@ -203,9 +221,19 @@ def _get_page(path: str) -> str:
             return f"No page found at {path}."
         raise
 
+    kind = _node_kind(data)
+    if kind == "fragment":
+        return (f"{path} is a Content Fragment, not a page. "
+                f"Use get_fragment on this path instead.")
+    if kind == "asset":
+        return (f"{path} is a DAM asset, not a page. This server does not read "
+                f"asset binaries.")
+
     content = data.get("jcr:content")
     if content is None:
-        return f"{path} exists but has no jcr:content — this is not a page, likely a folder."
+        return (f"{path} has no jcr:content, so it is not a page — most likely a "
+                f"folder. Use search_pages with root set to this path to find "
+                f"pages beneath it.")
 
     lines = [
         f"Page: {path}",
@@ -247,6 +275,51 @@ def get_page(path: str) -> str:
     return _get_page(path)
 
 
+def _list_children(path: str, limit: int = 50) -> str:
+    err = _validate_path(path)
+    if err:
+        return f"Refused: {err}"
+
+    path = path.rstrip("/")
+    data = aem_get("/bin/querybuilder.json", {
+        "path": path,
+        "path.flat": "true",     # direct children only, not the whole subtree
+        "type": "cq:Page",
+        "p.limit": limit,
+        "p.hits": "selective",
+        "p.properties": "jcr:path jcr:content/jcr:title",
+        "orderby": "path",
+    })
+
+    hits = data.get("hits", [])
+    if not hits:
+        return (f"No child pages under {path}. It may be a leaf page, a folder "
+                f"of assets, or not readable by the current user.")
+
+    total = data.get("total", len(hits))
+    lines = [f"{len(hits)} of {total} child page(s) under {path}:"]
+    for h in hits:
+        title = h.get("jcr:content", {}).get("jcr:title", "(no title)")
+        lines.append(f"  {h['jcr:path']} — {title}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def list_children(path: str, limit: int = 50) -> str:
+    """List the direct child pages of a path, for navigating the content tree.
+
+    Use this to explore structure when there is no obvious keyword to
+    search for, or when search results are ambiguous and you need to see
+    where a branch actually leads. Start high, such as /content/wknd, and
+    walk down one level at a time. Prefer this over guessing paths.
+
+    Args:
+        path: Absolute JCR path to list beneath, e.g. /content/wknd/us/en
+        limit: Maximum number of children to return
+    """
+    return _list_children(path, limit)
+
+
 def _get_page_properties(path: str) -> str:
     err = _validate_path(path)
     if err:
@@ -261,9 +334,19 @@ def _get_page_properties(path: str) -> str:
             return f"No page found at {path}."
         raise
 
+    kind = _node_kind(data)
+    if kind == "fragment":
+        return (f"{path} is a Content Fragment, not a page. "
+                f"Use get_fragment on this path instead.")
+    if kind == "asset":
+        return (f"{path} is a DAM asset, not a page. This server does not read "
+                f"asset binaries.")
+
     content = data.get("jcr:content")
     if content is None:
-        return f"{path} exists but has no jcr:content — this is not a page, likely a folder."
+        return (f"{path} has no jcr:content, so it is not a page — most likely a "
+                f"folder. Use search_pages with root set to this path to find "
+                f"pages beneath it.")
 
     lines = [f"Page: {path}"]
     for key in PAGE_PROPS:
@@ -348,9 +431,14 @@ def _get_fragment(path: str, variation: str = "master") -> str:
             return f"No asset found at {path}."
         raise
 
+    if _node_kind(data) == "page":
+        return (f"{path} is a page, not a Content Fragment. Use get_page for its "
+                f"content, or get_page_properties for its metadata.")
+
     content = data.get("jcr:content", {})
     if not content.get("contentFragment"):
-        return f"{path} exists but is not a Content Fragment."
+        return (f"{path} is not a Content Fragment. Use list_content_fragments "
+                f"to find fragment paths.")
 
     fdata = content.get("data", {})
     available = [k for k, v in fdata.items() if isinstance(v, dict)]

@@ -6,14 +6,14 @@ search pages, read page content and metadata, and read Content Fragments — ove
 plain HTTP, using AEM's own QueryBuilder and Sling GET servlet.
 
 It was written to understand the protocol from the inside rather than through a
-framework, and it is deliberately small: five tools, one file, no mutation.
+framework, and it is deliberately small: six tools, one file, no mutation.
 
 ## Status
 
 Working and tested against a local AEM as a Cloud Service SDK with the WKND
 sample content:
 
-- Five read-only tools, exercised through Claude Desktop with a real model
+- Six read-only tools, exercised through Claude Desktop with a real model
 - An MCP client harness (`mcp_client_test.py`) that verifies schema generation
   and tool dispatch over the SDK's in-memory transport
 - Unit tests covering the path guardrail, output bounds and content fencing
@@ -27,6 +27,7 @@ Apache Sling MCP server contributions framework. See [Limitations](#limitations)
 | Tool | Arguments | Returns |
 |---|---|---|
 | `search_pages` | `keyword`, `limit`, `root` | Page paths and titles, locale copies collapsed |
+| `list_children` | `path`, `limit` | Direct child pages, for walking the tree |
 | `get_page` | `path` | Page title and the text content of its components |
 | `get_page_properties` | `path` | Template, tags, modification and replication metadata |
 | `list_content_fragments` | `keyword`, `limit` | Content Fragment paths and titles |
@@ -87,6 +88,36 @@ reads one, and follows the `authorFragment` reference to a second fragment.
 
 Because tool return values also enter the model's context, they are written in
 the same language and register as the docstrings. They are prompts, not UI text.
+
+### Wrong tool choices are redirected, not rejected
+
+The model will sometimes call the wrong tool. A Content Fragment has a
+`jcr:content` node just as a page does, so `get_page` on a fragment path used to
+walk into the fragment data and return something that resembled a thin page —
+wrong, and worse, not visibly wrong.
+
+Nodes are now identified before they are read, and the error names both what was
+found and which tool handles it:
+
+```
+/content/dam/.../skitouring is a Content Fragment, not a page.
+Use get_fragment on this path instead.
+```
+
+The question is not how to stop the model choosing wrong. It is whether it can
+recover, which it can only do if the failure says what to try next.
+
+### Navigation, not only search
+
+Keyword search was originally the only way in. That does not hold up on a large
+site: the model cannot browse a tree it cannot see, and a keyword will not always
+surface the right branch. `list_children` uses QueryBuilder's `path.flat`
+predicate to return direct children only, so the model can walk down one level at
+a time rather than guessing paths.
+
+Its empty result deliberately names both possibilities — nothing there, or
+nothing readable by this user — so an unreadable branch is not reported as an
+empty one.
 
 ### Output is bounded, and truncation is visible
 
@@ -249,11 +280,13 @@ grants will miss things.
 - **One identity for all callers.** Correct under stdio, where each person runs
   their own process; wrong for any shared deployment.
 - **No mutation.** Deliberate, see above.
-- **Discovery is keyword-based.** Full-text QueryBuilder search over titles. At
-  ten thousand pages this becomes the weak point: the model cannot browse a tree
-  it cannot see, and keyword search will not always surface the right branch.
-  `root` scoping helps, and it is the natural place for a future
-  `list_children` tool.
+- **Discovery is keyword and navigation only.** `search_pages` is full-text over
+  titles and `list_children` walks the tree. At ten thousand pages neither is
+  enough on its own: full-text search at that scale needs proper Oak indexes, and
+  AEM's own taxonomy (`cq:tags`) is curated metadata this server does not yet
+  use. Semantic search is a further option, but a vector index is not
+  permission-aware, which disqualifies it as the primary path for a server whose
+  authorization comes from the repository.
 - **Locale copies are collapsed by leaf name and title.** Two genuinely distinct
   pages sharing both would be merged. Collapsing keeps the first hit, which is
   usually the `language-masters` source — the canonical path, but not
