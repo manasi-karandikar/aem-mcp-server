@@ -38,6 +38,15 @@ def aem_get(path: str, params: dict | None = None) -> dict:
 ALLOWED_ROOTS = ("/content",)
 TEXT_PROPS = ("jcr:title", "jcr:description", "text", "title", "subtitle")
 
+# Output limits. These are the only thing standing between a page's JCR
+# subtree and the model's context window, so they are named rather than
+# scattered as magic numbers.
+READ_DEPTH = 4              # Sling depth selector, never .infinity
+MAX_TEXT_ITEMS = 60         # cap on extracted lines per page
+PAGE_VALUE_CHARS = 300      # per-property cap for pages
+FRAGMENT_VALUE_CHARS = 500  # per-field cap for fragments (CFs are long-form)
+TRUNCATION_MARK = "…[truncated]"
+
 
 def _validate_path(path: str) -> str | None:
     """What the model sends is a request, not a command. This is where we decide."""
@@ -50,17 +59,27 @@ def _validate_path(path: str) -> str | None:
     return None
 
 
-def _clean(s: str, limit: int = 300) -> str:
-    """Strip HTML tags, collapse whitespace, cap length."""
+def _clean(s: str, limit: int = PAGE_VALUE_CHARS) -> str:
+    """Strip HTML tags, collapse whitespace, cap length.
+
+    Truncation is marked explicitly rather than with a bare ellipsis, so the
+    model can tell "this is all there was" apart from "there is more that you
+    did not receive".
+    """
     s = re.sub(r"<[^>]+>", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s if len(s) <= limit else s[:limit] + "…"
+    return s if len(s) <= limit else s[:limit] + TRUNCATION_MARK
 
 
-def _collect_text(node: dict, out: list, depth: int = 0, max_items: int = 60):
-    """Walk the component tree and pull out text-bearing properties."""
+def _collect_text(node: dict, out: list, depth: int = 0,
+                  max_items: int = MAX_TEXT_ITEMS) -> bool:
+    """Walk the component tree and pull out text-bearing properties.
+
+    Returns True if the walk stopped early because the item limit was hit.
+    """
     if len(out) >= max_items:
-        return
+        return True
+    hit_limit = False
     for key, val in node.items():
         if depth == 0 and key == "jcr:title":
             continue
@@ -68,10 +87,12 @@ def _collect_text(node: dict, out: list, depth: int = 0, max_items: int = 60):
             out.append(f"{'  ' * depth}{key}: {_clean(val)}")
     for key, val in node.items():
         if isinstance(val, dict) and not key.startswith("jcr:"):
-            _collect_text(val, out, depth + 1, max_items)
+            if _collect_text(val, out, depth + 1, max_items):
+                hit_limit = True
+    return hit_limit
 
 
-def _fragment_fields(variation: dict, limit_chars: int = 500) -> list:
+def _fragment_fields(variation: dict, limit_chars: int = FRAGMENT_VALUE_CHARS) -> list:
     """Extract real field values from a CF variation node, skipping metadata."""
     out = []
     for key, val in variation.items():
@@ -123,7 +144,7 @@ def _get_page(path: str) -> str:
 
     path = path.rstrip("/")
     try:
-        data = aem_get(f"{path}.4.json")
+        data = aem_get(f"{path}.{READ_DEPTH}.json")
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return f"No page found at {path}."
@@ -138,10 +159,13 @@ def _get_page(path: str) -> str:
         f"Title: {content.get('jcr:title', '(no title)')}",
     ]
     body = []
-    _collect_text(content, body)
+    hit_limit = _collect_text(content, body)
     if body:
         lines.append("Content:")
         lines.extend(body)
+        if hit_limit:
+            lines.append(f"  [stopped after {MAX_TEXT_ITEMS} items — this page has "
+                         f"more content that was not returned]")
     return "\n".join(lines)
 
 
@@ -152,6 +176,11 @@ def get_page(path: str) -> str:
     Use this after search_pages has given you a path, or when the user
     names an exact page path. Returns the page title and the text
     content of its components. Only paths under /content are allowed.
+
+    Output is deliberately bounded. Long values are cut off and marked
+    with "[truncated]", and if the page has more components than the
+    limit, a note says so. Treat any such marker as a signal that you
+    have not seen the whole page.
 
     Args:
         path: Absolute JCR path, e.g. /content/wknd/us/en/adventures/climbing-new-zealand
@@ -209,7 +238,7 @@ def _get_fragment(path: str, variation: str = "master") -> str:
 
     path = path.rstrip("/")
     try:
-        data = aem_get(f"{path}.4.json")
+        data = aem_get(f"{path}.{READ_DEPTH}.json")
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return f"No asset found at {path}."
