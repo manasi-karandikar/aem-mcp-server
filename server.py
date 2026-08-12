@@ -1,11 +1,24 @@
 import os
 import re
+import sys
 import httpx
 from mcp.server import MCPServer
 
 AEM_HOST = os.getenv("AEM_HOST", "http://localhost:4502")
-AEM_USER = os.getenv("AEM_USER", "admin")
-AEM_PASS = os.getenv("AEM_PASS", "admin")
+AEM_USER = os.getenv("AEM_USER")
+AEM_PASS = os.getenv("AEM_PASS")
+
+# Fail closed. There is deliberately no default identity: the user this
+# server connects as decides what the model is able to read, because AEM
+# enforces ACLs on the session, not in this code.
+if not AEM_USER or not AEM_PASS:
+    raise RuntimeError(
+        "AEM_USER and AEM_PASS must be set. This server will not fall back "
+        "to admin credentials."
+    )
+
+# stderr, not stdout — under stdio transport stdout is the protocol channel.
+print(f"aem-mcp-server: connecting to {AEM_HOST} as {AEM_USER}", file=sys.stderr)
 
 mcp = MCPServer("aem")
 
