@@ -1,4 +1,8 @@
-"""MCP client test — server ko protocol ke through bulao, seedha function call nahi."""
+"""MCP client test — exercise the server through the protocol, not by direct calls.
+
+Uses the SDK's in-memory transport, so this verifies schema generation,
+tool dispatch and result shapes without launching a subprocess.
+"""
 import asyncio
 import json
 

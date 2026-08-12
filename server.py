@@ -11,7 +11,7 @@ mcp = MCPServer("aem")
 
 
 def aem_get(path: str, params: dict | None = None) -> dict:
-    """AEM ko authenticated GET request."""
+    """Authenticated GET request against AEM."""
     r = httpx.get(
         f"{AEM_HOST}{path}",
         params=params,
@@ -27,25 +27,25 @@ TEXT_PROPS = ("jcr:title", "jcr:description", "text", "title", "subtitle")
 
 
 def _validate_path(path: str) -> str | None:
-    """Model jo bheje wo request hai, hukum nahi. Yahan hum decide karte hain."""
+    """What the model sends is a request, not a command. This is where we decide."""
     if not path.startswith("/"):
-        return "Path absolute hona chahiye, jaise /content/wknd/us/en"
+        return "Path must be absolute, e.g. /content/wknd/us/en"
     if ".." in path:
-        return "Path traversal allowed nahi hai"
+        return "Path traversal is not allowed"
     if not any(path == r or path.startswith(r + "/") for r in ALLOWED_ROOTS):
-        return f"Sirf /content ke neeche allowed hai. Mila: {path}"
+        return f"Only paths under /content are allowed. Got: {path}"
     return None
 
 
 def _clean(s: str, limit: int = 300) -> str:
-    """HTML tags hatao, whitespace collapse karo, lambaai cap karo."""
+    """Strip HTML tags, collapse whitespace, cap length."""
     s = re.sub(r"<[^>]+>", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s if len(s) <= limit else s[:limit] + "…"
 
 
 def _collect_text(node: dict, out: list, depth: int = 0, max_items: int = 60):
-    """Component tree mein ghoom ke text-wale properties nikaalo."""
+    """Walk the component tree and pull out text-bearing properties."""
     if len(out) >= max_items:
         return
     for key, val in node.items():
@@ -59,7 +59,7 @@ def _collect_text(node: dict, out: list, depth: int = 0, max_items: int = 60):
 
 
 def _fragment_fields(variation: dict, limit_chars: int = 500) -> list:
-    """CF variation node se asli field values nikaalo, metadata chhod ke."""
+    """Extract real field values from a CF variation node, skipping metadata."""
     out = []
     for key, val in variation.items():
         if "@" in key or key.startswith(("jcr:", "sling:", "cq:", "dam:")):
@@ -72,7 +72,7 @@ def _fragment_fields(variation: dict, limit_chars: int = 500) -> list:
 
 
 def _search_pages(keyword: str, limit: int = 10) -> str:
-    """Actual logic — testable, tool se alag."""
+    """Core logic, kept separate from the tool wrapper so it stays testable."""
     data = aem_get("/bin/querybuilder.json", {
         "path": "/content",
         "type": "cq:Page",
@@ -118,7 +118,7 @@ def _get_page(path: str) -> str:
 
     content = data.get("jcr:content")
     if content is None:
-        return f"{path} maujood hai par jcr:content nahi — ye page nahi, shayad folder hai."
+        return f"{path} exists but has no jcr:content — this is not a page, likely a folder."
 
     lines = [
         f"Page: {path}",
@@ -204,13 +204,13 @@ def _get_fragment(path: str, variation: str = "master") -> str:
 
     content = data.get("jcr:content", {})
     if not content.get("contentFragment"):
-        return f"{path} maujood hai par Content Fragment nahi hai."
+        return f"{path} exists but is not a Content Fragment."
 
     fdata = content.get("data", {})
     available = [k for k, v in fdata.items() if isinstance(v, dict)]
     node = fdata.get(variation)
     if node is None:
-        return (f"Variation '{variation}' nahi mili at {path}. "
+        return (f"Variation '{variation}' not found at {path}. "
                 f"Available: {', '.join(available) or 'none'}")
 
     lines = [
